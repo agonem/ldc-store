@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Version control
+.git/
+.gitignore
+
+# Environment files (sensitive)
+.env*
+!.env.example
+
+# Build outputs
+.next/
+out/
+build/
+coverage/
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDE & OS
+.DS_Store
+*.pem
+.vscode/
+.idea/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Documentation
+*.md
+docs/
+
+# Internal tooling
+.sisyphus/
+.claude/
+.ace-tool/
+.spec-workflow/
+.zcf/
+
+# Vercel
+.vercel/
+
+# Test files
+tests/
+vitest.config.ts

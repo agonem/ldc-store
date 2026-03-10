@@ -1,0 +1,159 @@
+name: docker-publish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ldc_build
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ldc_build
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ldc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set lowercase image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
+      - name: Pull built image
+        run: docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref == 'refs/heads/main' && 'latest' || github.ref_name }}
+
+      - name: Run container
+        run: |
+          docker run -d --name ldc-app \
+            --network host \
+            -e DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ldc_test" \
+            -e AUTH_SECRET="test-secret-for-ci-smoke-test-only" \
+            -e AUTH_TRUST_HOST="true" \
+            -e ADMIN_PASSWORD="test-admin-password" \
+            -e LDC_CLIENT_ID="test-client-id" \
+            -e LDC_CLIENT_SECRET="test-client-secret" \
+            -e LINUXDO_CLIENT_ID="test-linuxdo-client-id" \
+            -e LINUXDO_CLIENT_SECRET="test-linuxdo-client-secret" \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref == 'refs/heads/main' && 'latest' || github.ref_name }}
+
+      - name: Wait for app to start
+        run: |
+          echo "Waiting for app to start..."
+          sleep 10
+
+      - name: Health check with retries
+        run: |
+          for i in {1..12}; do
+            echo "Attempt $i: curl http://localhost:3000/api/health"
+            if curl -sf http://localhost:3000/api/health; then
+              echo ""
+              echo "Health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i failed, waiting 5s..."
+            sleep 5
+          done
+          echo "Health check failed after 12 attempts"
+          docker logs ldc-app
+          exit 1
+
+      - name: Verify JSON response
+        run: |
+          response=$(curl -sf http://localhost:3000/api/health)
+          echo "Response: $response"
+          if echo "$response" | grep -q '"status":"ok"'; then
+            echo "JSON response verified!"
+          else
+            echo "Unexpected response format"
+            exit 1
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ldc-app || true
